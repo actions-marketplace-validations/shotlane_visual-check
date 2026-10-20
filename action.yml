@@ -1,0 +1,102 @@
+name: Shotlane Visual Check
+description: Check preview deploys on phone, tablet and desktop, and post screenshots plus layout problems on the PR.
+author: Shotlane
+branding:
+  icon: smartphone
+  color: purple
+inputs:
+  api-key:
+    description: Shotlane API key (store it as a secret). Free key with 100 credits a month at https://shotlane.dev
+    required: true
+  url:
+    description: Base URL to check. Defaults to the deployment's URL on deployment_status events.
+    required: false
+    default: ""
+  pages:
+    description: Space-separated paths to check, e.g. "/ /pricing /blog".
+    required: false
+    default: "/"
+  devices:
+    description: Comma-separated devices (iphone, iphone_se, pixel, galaxy, ipad, laptop, desktop, desktop_hd). 1 credit per page per device.
+    required: false
+    default: "iphone,ipad,desktop"
+  vercel-bypass-secret:
+    description: Vercel "Protection Bypass for Automation" secret, for previews behind Vercel Deployment Protection.
+    required: false
+    default: ""
+  comment:
+    description: Post (and update) one comment on the pull request. Results always go to the job summary.
+    required: false
+    default: "true"
+  fail-on-issues:
+    description: Fail the step when any problem is found.
+    required: false
+    default: "false"
+  github-token:
+    description: Token used to find the PR and comment on it. Needs pull-requests write permission.
+    required: false
+    default: ${{ github.token }}
+outputs:
+  issues:
+    description: Number of problems found across all pages and devices.
+    value: ${{ steps.check.outputs.issues }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        SHOTLANE_API_KEY: ${{ inputs.api-key }}
+        BASE: ${{ inputs.url || github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
+        PAGES: ${{ inputs.pages }}
+        DEVICES: ${{ inputs.devices }}
+        BYPASS: ${{ inputs.vercel-bypass-secret }}
+        COMMENT: ${{ inputs.comment }}
+        FAIL: ${{ inputs.fail-on-issues }}
+        SHA: ${{ github.event.deployment.sha || github.event.pull_request.head.sha || github.sha }}
+        PR: ${{ github.event.pull_request.number }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        [ -n "$BASE" ] || { echo "::error::No URL to check: set the 'url' input or run on deployment_status."; exit 1; }
+        head="## Shotlane visual check"
+        body="$head"$'\n'"Preview: $BASE ($(cut -c1-7 <<<"$SHA"))"$'\n\n'
+        total=0
+        for path in $PAGES; do
+          req=$(jq -n --arg url "${BASE%/}$path" --arg d "$DEVICES" --arg b "$BYPASS" \
+            '{url: $url, devices: ($d | split(",")), keep_days: 30}
+             + (if $b != "" then {headers: {"x-vercel-protection-bypass": $b, "x-vercel-set-bypass-cookie": "true"}} else {} end)')
+          res=$(curl -sS --max-time 180 -X POST https://shotlane.dev/v1/check -H "Authorization: Bearer $SHOTLANE_API_KEY" \
+            -H "Content-Type: application/json" -H "User-Agent: shotlane-visual-check-action/1" -d "$req")
+          total=$((total + $(jq '.issues // 1' <<<"$res")))
+          body+=$(jq -r --arg p "$path" '
+            "### `\($p)`\n\n" +
+            (if .error then "Check failed: \(.error)" else
+              "| " + ([.shots[].device] | join(" | ")) + " |\n|" + ([.shots[] | "---"] | join("|")) + "|\n| " +
+              ([.shots[] | if .ok then "<a href=\"\(.url)\"><img src=\"\(.url)\" width=\"240\"></a>" else "failed: \(.error)" end] | join(" | ")) + " |\n\n" +
+              ([.shots[] | select(.ok) | .device as $d | .issues[] | "- **\($d)**: \(.)"] |
+                if length == 0 then "No problems found." else join("\n") end)
+            end)' <<<"$res")$'\n\n'
+        done
+        body+="<sub>$total problem(s) · screenshots kept 30 days · [Shotlane](https://shotlane.dev/docs#check)</sub>"
+        echo "$body" >> "$GITHUB_STEP_SUMMARY"
+        echo "issues=$total" >> "$GITHUB_OUTPUT"
+        if [ "$COMMENT" = "true" ]; then
+          pr=${PR:-$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" --jq '.[0].number // empty' || true)}
+          if [ -z "$pr" ]; then
+            echo "No open PR for $SHA; results are in the job summary."
+          else
+            # one comment per PR, updated on every deploy
+            id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" --paginate \
+              --jq "[.[] | select(.body | startswith(\"$head\"))][0].id // empty" | head -1)
+            if [ -n "$id" ]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" >/dev/null
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" -f body="$body" >/dev/null
+            fi
+          fi
+        fi
+        if [ "$FAIL" = "true" ] && [ "$total" -gt 0 ]; then
+          echo "::error::Shotlane found $total problem(s); see the job summary."
+          exit 1
+        fi
