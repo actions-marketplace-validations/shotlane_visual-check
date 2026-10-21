@@ -6,6 +6,9 @@ Checks every preview deploy on phone, tablet and desktop, and posts the screensh
 - a missing viewport tag
 - uncaught JavaScript errors and console errors
 - failed requests and broken images
+- text squeezed into a narrow column (words breaking letter by letter), text cut off by its box, and overlapping text
+- text below WCAG AA contrast
+- tap targets under 24×24px on phones (WCAG 2.5.8)
 
 It works with Vercel, Netlify, Cloudflare Pages and anything else that reports GitHub deployment statuses. One comment per PR, updated on every deploy.
 
@@ -67,7 +70,7 @@ on: pull_request
 
 Output: `issues`, the number of problems found.
 
-Screenshots are hosted at unguessable links for 30 days, then deleted. Privacy: [shotlane.dev/privacy](https://shotlane.dev/privacy). API docs: [shotlane.dev/docs#check](https://shotlane.dev/docs#check).
+Screenshots are hosted at unguessable links for 30 days, then deleted. Privacy: [shotlane.dev/privacy](https://shotlane.dev/privacy). API docs: [shotlane.dev/docs/devices](https://shotlane.dev/docs/devices#what-it-checks).
 
 ## License
 
